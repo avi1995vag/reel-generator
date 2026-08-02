@@ -53,14 +53,11 @@ def main():
     scene_path = hyperframes_builder.build_scene(script, clip_paths, image_paths)
 
     print("\n=== Python side done. Rendering final video: ===")
-    render_cmd = (
-        f"hyperframes render {scene_path} --out {config.OUTPUT_DIR}/final_reel.mp4 "
-        f"--fps {config.FPS} --aspect {config.VIDEO_ASPECT}"
-    )
+    final_path = os.path.join(config.OUTPUT_DIR, "final_reel.mp4")
+    render_cmd = f"npx --yes hyperframes render -c {scene_path} -o {final_path}"
     print(f"  {render_cmd}")
     os.system(render_cmd)  # unattended: actually run it, don't just print it
 
-    final_path = os.path.join(config.OUTPUT_DIR, "final_reel.mp4")
     avatar_status_path = os.path.join(config.OUTPUT_DIR, "avatar_status.json")
     avatar_note = ""
     if os.path.exists(avatar_status_path):
