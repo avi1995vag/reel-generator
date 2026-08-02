@@ -9,7 +9,11 @@ LANGUAGE = os.environ.get("REEL_LANGUAGE", "en-IN")
 TONE = "energetic, punchy, scroll-stopping"   # style hint for the script
 
 # --- Voice ---
-GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"   # check ai.google.dev for latest TTS model name
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"   # ⚠️ same model generation as the
+                                 # gemini-2.5-flash text model that got deprecated --
+                                 # if voice_generator.py starts throwing a 404, check
+                                 # https://ai.google.dev/gemini-api/docs/speech-generation
+                                 # for the current TTS model ID and update this.
 VOICE_NAME = "Kore"             # pick from Gemini's prebuilt voice list
 
 # --- Avatar ---
