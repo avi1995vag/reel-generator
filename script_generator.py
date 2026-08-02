@@ -65,7 +65,14 @@ def generate_script(topic: str = None) -> dict:
     )
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        # "gemini-flash-latest" is Google's alias that they keep pointed at
+        # the current GA Flash model, so this survives future model
+        # retirements better than pinning an exact version like
+        # "gemini-2.5-flash" (which was deprecated for new users -- that's
+        # what broke this pipeline before this fix). If you ever hit a 404
+        # here again, check https://ai.google.dev/gemini-api/docs/models
+        # for the current model ID and swap it in directly.
+        model="gemini-flash-latest",
         contents=f"Topic: {topic}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
