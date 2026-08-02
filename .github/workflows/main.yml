@@ -1,0 +1,84 @@
+name: Generate Reel
+
+# Trigger this from the "Actions" tab on GitHub -> "Generate Reel" ->
+# "Run workflow" -> type your topic in the box -> Run. That's the entire
+# manual step. Everything after that runs unattended on GitHub's free
+# runners, no GPU needed (avatar step calls a free hosted service).
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Reel topic"
+        required: true
+        default: "5 morning habits that boost productivity"
+      language:
+        description: "Language code (en-IN, hi-IN, ta-IN, kn-IN, te-IN, ml-IN, bn-IN, mr-IN)"
+        required: true
+        default: "kn-IN"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install HyperFrames CLI
+        run: npm install -g @heygen/hyperframes   # verify current package name
+
+      - name: Set language override
+        run: echo "REEL_LANGUAGE=${{ github.event.inputs.language }}" >> $GITHUB_ENV
+
+      - name: Run full pipeline (unattended)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+          REEL_TOPIC: ${{ github.event.inputs.topic }}
+        run: python pipeline.py "${{ github.event.inputs.topic }}"
+
+      - name: Upload finished reel
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-reel
+          path: output/final_reel.mp4
+          if-no-files-found: warn
+
+      - name: Upload debug artifacts (script/audio/images/avatar status for review)
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-assets
+          path: |
+            output/script.json
+            output/avatar_status.json
+            output/images/
+            output/audio/
+          if-no-files-found: ignore
+
+      - name: Flag avatar issues in job summary
+        if: always()
+        run: |
+          if [ -f output/avatar_status.json ]; then
+            python3 -c "
+          import json
+          s = json.load(open('output/avatar_status.json'))
+          if s['failed']:
+              print('### ⚠️ Avatar warnings')
+              print(f\"{len(s['failed'])}/{s['total_scenes']} scene(s) have no talking avatar.\")
+              for f in s['failed']:
+                  print(f\"- Scene {f['scene_id']}: {f['error']}\")
+          else:
+              print('### ✅ Avatar generated for all scenes')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
