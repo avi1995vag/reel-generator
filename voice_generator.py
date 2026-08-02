@@ -1,39 +1,63 @@
 """
-Step 2: script.json -> one WAV file per scene using Gemini native TTS.
+Step 2: script.json -> one audio file per scene.
 
-NOTE on languages: Gemini's native TTS preview models auto-detect the
-input text's language and pick a matching voice. Language coverage is
-still growing (Preview) -- Hindi and several major Indian languages are
-supported; if your target language (e.g. Tamil) isn't producing good
-results, swap this module's client calls for Google Cloud Text-to-Speech
-(https://cloud.google.com/text-to-speech) instead, which has 75+ languages
-including Tamil, Telugu, Kannada, Malayalam, Bengali, Marathi with native
-voices. The rest of this pipeline (avatar + HyperFrames) doesn't care which
-TTS backend produced the audio.
+Default backend: edge-tts -- genuinely free, no API key, no billing, no
+card required. It's an unofficial wrapper around the neural voices behind
+Microsoft Edge's browser read-aloud feature, but it's widely used and
+stable. This replaces the earlier Gemini-native-TTS default, which hit two
+walls in testing: a tiny per-minute rate limit, then a hard 10-requests/day
+cap on the free tier that pacing/retries can't work around. Google Cloud
+TTS (the other alternative) has a generous free character allowance but
+requires enabling billing on the GCP project even to use it, so it's not
+a true no-card option.
 
-NOTE on rate limits: the free tier for this TTS model allows only a
-handful of requests per minute (Google's error message reports the exact
-number when you hit it, e.g. "limit: 3"). This module paces requests with
-a fixed delay between scenes and retries with backoff if a 429
-RESOURCE_EXHAUSTED error slips through anyway, so a 5+ scene video doesn't
-just fail outright on the free tier.
+Voice selection is dynamic: rather than hardcoding an exact voice name
+(which risks being wrong/renamed), this looks up available voices by
+locale (e.g. "kn-IN") at request time via edge_tts.VoicesManager and picks
+a matching one automatically.
+
+Fallback: set config.TTS_BACKEND = "gemini" to use Gemini's native TTS
+instead (useful if you've enabled billing on your Gemini API project and
+want higher request limits).
 """
+import asyncio
 import os
 import time
 import wave
 
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError
-
 import config
 
-# Free tier is tight (observed as low as 3 requests/minute for this model).
-# Space calls out so we don't even try to burst past that.
-SECONDS_BETWEEN_REQUESTS = 21   # ~3 req/min pace, safely under the ceiling
-MAX_RETRIES = 4
-RETRY_BACKOFF_SEC = 30           # doubles each retry: 30s, 60s, 120s...
 
+# ---------------------------------------------------------------------------
+# Backend 1: edge-tts (default, free, no key)
+# ---------------------------------------------------------------------------
+
+async def _edge_tts_synthesize(text: str, locale: str, out_path: str):
+    import edge_tts
+
+    voices = await edge_tts.list_voices()
+    manager = await edge_tts.VoicesManager.create(voices)
+    matches = manager.find(Locale=locale)
+    if not matches:
+        raise RuntimeError(
+            f"No edge-tts voice found for locale '{locale}'. Run "
+            f"`edge-tts --list-voices` to see available locales and adjust "
+            f"config.LANGUAGE to match one exactly (e.g. 'kn-IN', 'hi-IN')."
+        )
+    voice_name = matches[0]["Name"]
+    communicate = edge_tts.Communicate(text, voice_name)
+    await communicate.save(out_path)
+    return voice_name
+
+
+def generate_voice_for_scene_edge(text: str, out_path: str) -> str:
+    """out_path should end in .mp3 -- edge-tts outputs mp3 natively."""
+    return asyncio.run(_edge_tts_synthesize(text, config.LANGUAGE, out_path))
+
+
+# ---------------------------------------------------------------------------
+# Backend 2: Gemini native TTS (fallback, needs GEMINI_API_KEY + quota)
+# ---------------------------------------------------------------------------
 
 def _save_pcm_as_wav(pcm_data: bytes, path: str, channels=1, rate=24000, sample_width=2):
     with wave.open(path, "wb") as wf:
@@ -43,7 +67,9 @@ def _save_pcm_as_wav(pcm_data: bytes, path: str, channels=1, rate=24000, sample_
         wf.writeframes(pcm_data)
 
 
-def generate_voice_for_scene(client, text: str, out_path: str):
+def generate_voice_for_scene_gemini(client, text: str, out_path: str):
+    from google.genai import types
+
     response = client.models.generate_content(
         model=config.GEMINI_TTS_MODEL,
         contents=text,
@@ -58,28 +84,31 @@ def generate_voice_for_scene(client, text: str, out_path: str):
             ),
         ),
     )
-
     part = response.candidates[0].content.parts[0]
-    audio_bytes = part.inline_data.data
-    # Gemini TTS returns raw PCM (16-bit, 24kHz, mono) -- wrap it in a WAV header.
-    _save_pcm_as_wav(audio_bytes, out_path)
+    _save_pcm_as_wav(part.inline_data.data, out_path)
 
 
-def generate_voice_for_scene_with_retry(client, text: str, out_path: str, scene_id: int):
-    backoff = RETRY_BACKOFF_SEC
-    for attempt in range(1, MAX_RETRIES + 1):
+def generate_voice_for_scene_gemini_with_retry(client, text: str, out_path: str, scene_id: int):
+    from google.genai.errors import ClientError
+
+    backoff = 30
+    for attempt in range(1, 5):
         try:
-            generate_voice_for_scene(client, text, out_path)
+            generate_voice_for_scene_gemini(client, text, out_path)
             return
         except ClientError as e:
             is_quota = getattr(e, "status_code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e)
-            if not is_quota or attempt == MAX_RETRIES:
+            if not is_quota or attempt == 4:
                 raise
-            print(f"[voice_generator] scene {scene_id}: quota hit (attempt "
-                  f"{attempt}/{MAX_RETRIES}), waiting {backoff}s before retry...")
+            print(f"[voice_generator] scene {scene_id}: quota hit (attempt {attempt}/4), "
+                  f"waiting {backoff}s...")
             time.sleep(backoff)
             backoff *= 2
 
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
 def generate_all_voices(script: dict = None):
     import json
@@ -88,19 +117,31 @@ def generate_all_voices(script: dict = None):
         with open(os.path.join(config.OUTPUT_DIR, "script.json"), encoding="utf-8") as f:
             script = json.load(f)
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
     audio_dir = os.path.join(config.OUTPUT_DIR, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
+    backend = getattr(config, "TTS_BACKEND", "edge")
+    gemini_client = None
+    if backend == "gemini":
+        from google import genai
+        gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
     paths = []
     for i, scene in enumerate(script["scenes"]):
-        if i > 0:
-            time.sleep(SECONDS_BETWEEN_REQUESTS)   # stay under free-tier rate limit
+        ext = "mp3" if backend == "edge" else "wav"
+        out_path = os.path.join(audio_dir, f"scene_{scene['id']}.{ext}")
 
-        out_path = os.path.join(audio_dir, f"scene_{scene['id']}.wav")
-        generate_voice_for_scene_with_retry(client, scene["voiceover"], out_path, scene["id"])
-        print(f"[voice_generator] scene {scene['id']} -> {out_path}")
+        if backend == "edge":
+            voice_used = generate_voice_for_scene_edge(scene["voiceover"], out_path)
+            print(f"[voice_generator] scene {scene['id']} -> {out_path} (voice: {voice_used})")
+        else:
+            if i > 0:
+                time.sleep(21)   # stay under Gemini free-tier per-minute limit
+            generate_voice_for_scene_gemini_with_retry(
+                gemini_client, scene["voiceover"], out_path, scene["id"]
+            )
+            print(f"[voice_generator] scene {scene['id']} -> {out_path}")
+
         paths.append(out_path)
 
     return paths
