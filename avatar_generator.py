@@ -41,8 +41,20 @@ WAV2LIP_DIR = "../Wav2Lip"
 # come and go, so treat this as a starting point, not a permanent address.
 HF_SADTALKER_SPACE = "John6666/SadTalker"
 
+# The exact api_name Gradio auto-generates depends on the underlying
+# function name and Gradio version, and isn't reliably guessable from
+# outside -- these are ordered best-guesses based on the Space's source
+# (its button is wired to a method called .test(), which Gradio commonly
+# turns into "/test"; "/predict" is Gradio's older default name).
+CANDIDATE_API_NAMES = ["/test", "/predict", "/generate_video", "/run"]
+
 AVATAR_MAX_RETRIES = 3
 AVATAR_RETRY_BACKOFF_SEC = 15   # doubles each retry: 15s, 30s, 60s...
+
+# Resolved once per process run and cached, so we don't re-try the whole
+# candidate list (and burn retry backoff time) for every single scene once
+# we already know which name works -- or already know none of them do.
+_endpoint_cache = {"resolved_name": None, "gave_up": False, "diagnostic": None}
 
 
 def run_sadtalker(audio_path: str, result_dir: str):
@@ -75,18 +87,57 @@ def run_hosted_sadtalker(audio_path: str, out_path: str):
     """
     from gradio_client import Client, handle_file
 
+    if _endpoint_cache["gave_up"]:
+        # Already established this run that none of our guesses work --
+        # fail fast instead of repeating a doomed attempt for every scene.
+        raise RuntimeError(
+            "SadTalker hosted endpoint could not be resolved (see earlier "
+            "log / output/avatar_status.json for the full API spec dump)."
+        )
+
     client = Client(HF_SADTALKER_SPACE)
-    # NOTE: the exact api_name / parameter order depends on how that Space's
-    # app.py is written. Run client.view_api() once to print the real
-    # signature and adjust the call below if it differs.
-    result = client.predict(
-        source_image=handle_file(config.AVATAR_IMAGE),
-        driven_audio=handle_file(audio_path),
-        preprocess="full",
-        still_mode=True,
-        use_enhancer=True,
-        api_name="/predict",
-    )
+
+    def _attempt(api_name):
+        return client.predict(
+            handle_file(config.AVATAR_IMAGE),   # source_image
+            handle_file(audio_path),            # driven_audio
+            "full",                              # preprocess mode
+            True,                                 # still mode (fewer head movements)
+            True,                                 # GFPGAN face enhancer
+            api_name=api_name,
+        )
+
+    if _endpoint_cache["resolved_name"]:
+        result = _attempt(_endpoint_cache["resolved_name"])
+    else:
+        result = None
+        last_err = None
+        for candidate in CANDIDATE_API_NAMES:
+            try:
+                result = _attempt(candidate)
+                _endpoint_cache["resolved_name"] = candidate
+                print(f"[avatar_generator] resolved SadTalker endpoint: {candidate}")
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if result is None:
+            # None of our guesses matched -- dump the Space's real API spec
+            # so the exact fix is visible in the log/avatar_status.json
+            # instead of us guessing again next time.
+            try:
+                spec = client.view_api(print_info=False, return_format="dict")
+            except Exception as spec_err:
+                spec = f"<could not introspect API either: {spec_err}>"
+            diagnostic = (
+                f"None of {CANDIDATE_API_NAMES} matched this Space's API. "
+                f"Last error: {last_err}\nActual API spec: {spec}"
+            )
+            _endpoint_cache["gave_up"] = True
+            _endpoint_cache["diagnostic"] = diagnostic
+            raise RuntimeError(diagnostic)
+
     # Gradio returns a local temp file path (or dict with a "video" key
     # depending on the Space) -- normalize both cases.
     result_path = result["video"] if isinstance(result, dict) else result
