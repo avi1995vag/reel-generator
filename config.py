@@ -9,6 +9,9 @@ LANGUAGE = os.environ.get("REEL_LANGUAGE", "en-IN")
 TONE = "energetic, punchy, scroll-stopping"   # style hint for the script
 
 # --- Voice ---
+TTS_BACKEND = "edge"            # "edge" = free, no API key, no billing (recommended).
+                                 # "gemini" = Gemini native TTS -- needs GEMINI_API_KEY,
+                                 # has a small free-tier daily request cap.
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"   # ⚠️ same model generation as the
                                  # gemini-2.5-flash text model that got deprecated --
                                  # if voice_generator.py starts throwing a 404, check
