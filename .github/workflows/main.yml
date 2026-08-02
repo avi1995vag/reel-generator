@@ -34,8 +34,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install HyperFrames CLI
-        run: npm install -g @heygen/hyperframes   # verify current package name
+      # No install step for HyperFrames -- pipeline.py calls it via
+      # `npx --yes hyperframes`, which fetches it on first use automatically.
 
       - name: Set language override
         run: echo "REEL_LANGUAGE=${{ github.event.inputs.language }}" >> $GITHUB_ENV
