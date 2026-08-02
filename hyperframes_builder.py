@@ -91,8 +91,9 @@ def build_scene(script: dict = None, clip_paths: list[str] = None, image_paths: 
             os.path.join(config.OUTPUT_DIR, "images", f"scene_{s['id']}.jpg")
             for s in script["scenes"]
         ]
+    audio_ext = "mp3" if getattr(config, "TTS_BACKEND", "edge") == "edge" else "wav"
     audio_paths = [
-        os.path.join(config.OUTPUT_DIR, "audio", f"scene_{s['id']}.wav")
+        os.path.join(config.OUTPUT_DIR, "audio", f"scene_{s['id']}.{audio_ext}")
         for s in script["scenes"]
     ]
 
