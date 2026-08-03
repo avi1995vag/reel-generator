@@ -20,9 +20,10 @@ signature isn't reliably guessable from outside, and calls could hang
 well past any reasonable wait. Rather than ship something that
 occasionally stalls a whole run, the default pipeline produces reels with
 captions + auto-sourced B-roll + voiceover, which has worked consistently
-end to end. See **"Turning the avatar back on"** below if you want to
-pursue it — it's a real feature, just not a reliable unattended default
-yet.
+end to end. Want a talking avatar too? See **"Turning the avatar back
+on"** below — `Run_On_Colab.ipynb` runs real SadTalker on a free GPU
+using your own photo (a manual notebook run, but it actually works,
+unlike the earlier hosted attempt).
 
 ## One-time setup (5 minutes, never repeat this)
 
@@ -83,27 +84,29 @@ pipeline.py             # runs all of the above in order, unattended
 
 ## Turning the avatar back on
 
-`avatar_generator.py` supports a real talking-avatar step; it's just not
-the default because the free path was unreliable in testing. Two ways to
-actually use it:
+Two ways to run this pipeline:
 
-**Option A — hosted (free, but flaky):** in `config.py` set
-`AVATAR_BACKEND = "hosted"`. Before relying on it, confirm the real API
-signature of whatever public SadTalker Space you're pointing at:
-```python
-from gradio_client import Client
-client = Client("John6666/SadTalker")   # or another Space
-client.view_api()   # prints the actual endpoint names/parameters
-```
-Update `CANDIDATE_API_NAMES` and the parameter list in
-`run_hosted_sadtalker()` (in `avatar_generator.py`) to match what that
-prints, rather than relying on the code's built-in guesses.
+**Videos without a talking avatar (fully automatic, GitHub Actions):**
+follow the setup above. Captions + auto-sourced B-roll + voiceover, zero
+manual steps per video. This is the default and it's reliable.
 
-**Option B — local (more reliable, needs a GPU):** set
-`AVATAR_BACKEND = "local"`, install SadTalker or Wav2Lip yourself (see
-`avatar_engine/README.md`), and run the pipeline on a machine or Colab
-session with a GPU. This is the more dependable path if a talking avatar
-matters enough to be worth the setup.
+**Videos WITH a talking avatar (needs manual run, but works):** open
+`Run_On_Colab.ipynb` in Google Colab (https://colab.research.google.com →
+File → Upload notebook). Set the runtime to a free T4 GPU, run the cells
+top to bottom — it clones real SadTalker, installs it, and runs it
+directly on that GPU using a photo you upload. This replaced an earlier
+"hosted" approach (calling a public Hugging Face demo) that proved
+unreliable: its real API kept not matching what could be guessed from
+outside, and calls could hang indefinitely. Running SadTalker yourself
+on a GPU you control is slower to set up (a few minutes per session) but
+actually produces a working video, which the hosted route didn't
+reliably do.
+
+This is a real trade-off, not a temporary bug: a free, fully-unattended,
+reliable talking avatar isn't something either path currently delivers at
+once. Pick automatic-without-avatar for daily hands-off videos, or
+Colab-with-avatar for when you specifically want the talking-head version
+and are fine running a notebook for it.
 
 ## Adjusting the look without touching code
 
