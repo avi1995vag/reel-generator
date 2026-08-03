@@ -1,28 +1,35 @@
 """
 Step 3: audio/scene_N.wav + avatar photo -> avatar_clips/scene_N.mp4
 
-Two modes, controlled by config.AVATAR_BACKEND:
+Three modes, controlled by config.AVATAR_BACKEND:
 
-  "hosted"  (default, fully online, no GPU/install needed) -- calls a
-            public SadTalker Space on Hugging Face via gradio_client.
-            Runs on HF's free shared GPU queue. Good for getting started
-            and for low volume. Can be slow/queued at busy times since
-            you're sharing GPU capacity with everyone else using that
-            public Space.
+  "none"    (default, reliable) -- skip the avatar entirely. The video
+            ships with captions + auto-sourced B-roll + voiceover, which
+            has worked end to end consistently. No network calls, no
+            waiting, no failure risk from this step.
+
+  "hosted"  -- calls a public SadTalker Space on Hugging Face via
+            gradio_client, running on HF's free shared GPU queue. In
+            testing this was unreliable: the Space's real API endpoint
+            name isn't reliably guessable from outside, and a call can
+            hang well past any reasonable wait. Only turn this on if
+            you've confirmed (via client.view_api()) the real endpoint
+            name for the Space you're using, and are prepared for
+            occasional failures on a shared free queue.
 
   "local"   -- shells out to a SadTalker/Wav2Lip checkout you installed
-            yourself (see avatar_engine/README.md). Faster and more
-            reliable once set up, but needs a local or Colab GPU.
+            yourself (see avatar_engine/README.md). Needs a local or
+            Colab GPU, but is the most reliable way to get a real talking
+            avatar since you control the exact code running.
 
-Resilience: each scene gets up to AVATAR_MAX_RETRIES attempts (the hosted
-free queue occasionally times out or errors transiently). If a scene still
-fails after retries, it does NOT get silently dropped -- it's recorded in
-output/avatar_status.json and printed as a loud warning in the run log, so
-you notice it when reviewing the video instead of just seeing a caption
-with no avatar bubble and wondering why.
+Resilience (for "hosted"/"local"): each scene gets up to AVATAR_MAX_RETRIES
+attempts. If a scene still fails, it does NOT get silently dropped -- it's
+recorded in output/avatar_status.json and printed as a loud warning in the
+run log.
 
 Edit SADTALKER_DIR / WAV2LIP_DIR below only if you use "local" mode.
 """
+import concurrent.futures
 import glob
 import json
 import os
@@ -48,8 +55,11 @@ HF_SADTALKER_SPACE = "John6666/SadTalker"
 # turns into "/test"; "/predict" is Gradio's older default name).
 CANDIDATE_API_NAMES = ["/test", "/predict", "/generate_video", "/run"]
 
-AVATAR_MAX_RETRIES = 3
-AVATAR_RETRY_BACKOFF_SEC = 15   # doubles each retry: 15s, 30s, 60s...
+AVATAR_MAX_RETRIES = 2
+AVATAR_RETRY_BACKOFF_SEC = 10   # 10s, then give up -- a stuck/broken hosted
+                                 # endpoint won't fix itself by waiting longer,
+                                 # and the timeout above already caps each
+                                 # individual attempt.
 
 # Resolved once per process run and cached, so we don't re-try the whole
 # candidate list (and burn retry backoff time) for every single scene once
@@ -98,14 +108,22 @@ def run_hosted_sadtalker(audio_path: str, out_path: str):
     client = Client(HF_SADTALKER_SPACE)
 
     def _attempt(api_name):
-        return client.predict(
-            handle_file(config.AVATAR_IMAGE),   # source_image
-            handle_file(audio_path),            # driven_audio
-            "full",                              # preprocess mode
-            True,                                 # still mode (fewer head movements)
-            True,                                 # GFPGAN face enhancer
-            api_name=api_name,
-        )
+        def _call():
+            return client.predict(
+                handle_file(config.AVATAR_IMAGE),   # source_image
+                handle_file(audio_path),            # driven_audio
+                "full",                              # preprocess mode
+                True,                                 # still mode (fewer head movements)
+                True,                                 # GFPGAN face enhancer
+                api_name=api_name,
+            )
+        # Hard timeout -- gradio_client has no reliable built-in timeout for
+        # a queued call, and a stuck request previously hung the whole job
+        # for its full 30-minute limit. This can't force-kill the network
+        # call, but it stops US from waiting past AVATAR_REQUEST_TIMEOUT_SEC.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_call)
+            return future.result(timeout=config.AVATAR_REQUEST_TIMEOUT_SEC)
 
     if _endpoint_cache["resolved_name"]:
         result = _attempt(_endpoint_cache["resolved_name"])
@@ -199,6 +217,18 @@ def generate_all_avatar_clips(audio_paths: list[str]) -> list[str]:
     the rest. Failures are recorded in output/avatar_status.json and
     printed as a loud, impossible-to-miss summary at the end -- so a failed
     avatar shows up as a clear notice, not a silently missing bubble."""
+    backend = getattr(config, "AVATAR_BACKEND", "none")
+
+    if backend == "none":
+        print("[avatar_generator] Avatar disabled (config.AVATAR_BACKEND = 'none') "
+              "-- using captions + B-roll only. This is intentional, not a failure; "
+              "set AVATAR_BACKEND to 'hosted' or 'local' in config.py to enable it.")
+        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+        with open(os.path.join(config.OUTPUT_DIR, "avatar_status.json"), "w") as f:
+            json.dump({"total_scenes": len(audio_paths), "succeeded": 0,
+                       "failed": [], "disabled": True}, f, indent=2)
+        return [None] * len(audio_paths)
+
     clip_paths = []
     failures = []
 
