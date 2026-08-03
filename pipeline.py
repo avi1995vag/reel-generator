@@ -11,6 +11,7 @@ run back to back. You only look at the final MP4 at the end.
 """
 import json
 import os
+import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -46,7 +47,7 @@ def main():
     print("\n=== 3/5 Auto-sourcing B-roll images (Pexels) ===")
     image_paths = image_sourcer.source_all_images(script)
 
-    print("\n=== 4/5 Avatar clips (hosted, free GPU via Hugging Face) ===")
+    print("\n=== 4/5 Avatar clips ===")
     clip_paths = avatar_generator.generate_all_avatar_clips(audio_paths)
 
     print("\n=== 5/5 Building HyperFrames scene ===")
@@ -54,24 +55,38 @@ def main():
 
     print("\n=== Python side done. Rendering final video: ===")
     final_path = os.path.join(config.OUTPUT_DIR, "final_reel.mp4")
-    render_cmd = f"npx --yes hyperframes render -c {scene_path} -o {final_path}"
-    print(f"  {render_cmd}")
-    os.system(render_cmd)  # unattended: actually run it, don't just print it
+    render_cmd = ["npx", "--yes", "hyperframes", "render", "-c", scene_path, "-o", final_path]
+    print(f"  {' '.join(render_cmd)}")
+
+    # Use subprocess (not os.system) so we capture the real exit code and
+    # full output -- a prior version used os.system() and only inferred
+    # failure from the file not existing, which meant a broken render
+    # still showed a green checkmark in GitHub Actions.
+    render_result = subprocess.run(render_cmd, capture_output=True, text=True)
+    print(render_result.stdout)
+    if render_result.stderr:
+        print(render_result.stderr, file=sys.stderr)
 
     avatar_status_path = os.path.join(config.OUTPUT_DIR, "avatar_status.json")
     avatar_note = ""
     if os.path.exists(avatar_status_path):
         with open(avatar_status_path) as f:
             status = json.load(f)
-        if status["failed"]:
+        if status.get("failed"):
             avatar_note = (f" (note: {len(status['failed'])}/{status['total_scenes']} "
                             f"scene(s) missing avatar -- see output/avatar_status.json)")
 
-    if os.path.exists(final_path):
+    if render_result.returncode == 0 and os.path.exists(final_path):
         print(f"\n✅ Done: {final_path}{avatar_note} -- review this.")
     else:
-        print("\n⚠️ Render command didn't produce final_reel.mp4 -- check the "
-              "HyperFrames CLI output above, flags/package name may have changed.")
+        print(f"\n❌ Render failed (exit code {render_result.returncode}) -- "
+              f"final_reel.mp4 was not produced. See the render output above "
+              f"for the actual error. Common causes: HyperFrames CLI version/flag "
+              f"changes, missing ffmpeg, or a composition HTML issue -- try "
+              f"`npx hyperframes lint {scene_path}` locally to check the composition, "
+              f"and `npx hyperframes doctor` to check the environment.")
+        sys.exit(1)   # non-zero exit -> GitHub Actions job shows a real failure,
+                       # not a misleading green checkmark with no video attached
 
 
 if __name__ == "__main__":
