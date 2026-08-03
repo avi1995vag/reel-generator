@@ -29,13 +29,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # No install step for HyperFrames -- pipeline.py calls it via
-      # `npx --yes hyperframes`, which fetches it on first use automatically.
+      - name: Confirm ffmpeg is present (HyperFrames requires it)
+        run: ffmpeg -version || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
+      - name: HyperFrames environment check
+        run: npx --yes hyperframes doctor
+        continue-on-error: true   # diagnostic only -- don't block the run on this
 
       - name: Set language override
         run: echo "REEL_LANGUAGE=${{ github.event.inputs.language }}" >> $GITHUB_ENV
@@ -66,19 +70,26 @@ jobs:
             output/audio/
           if-no-files-found: ignore
 
-      - name: Flag avatar issues in job summary
+      - name: Flag avatar/render status in job summary
         if: always()
         run: |
-          if [ -f output/avatar_status.json ]; then
-            python3 -c "
-          import json
-          s = json.load(open('output/avatar_status.json'))
-          if s['failed']:
-              print('### ⚠️ Avatar warnings')
-              print(f\"{len(s['failed'])}/{s['total_scenes']} scene(s) have no talking avatar.\")
-              for f in s['failed']:
-                  print(f\"- Scene {f['scene_id']}: {f['error']}\")
+          python3 -c "
+          import json, os
+
+          if os.path.exists('output/avatar_status.json'):
+              s = json.load(open('output/avatar_status.json'))
+              if s.get('disabled'):
+                  print('### ℹ️ Avatar disabled by config (AVATAR_BACKEND = \'none\') -- captions + B-roll only, this is expected.')
+              elif s['failed']:
+                  print('### ⚠️ Avatar warnings')
+                  print(f\"{len(s['failed'])}/{s['total_scenes']} scene(s) have no talking avatar.\")
+                  for f in s['failed']:
+                      print(f\"- Scene {f['scene_id']}: {f['error']}\")
+              else:
+                  print('### ✅ Avatar generated for all scenes')
+
+          if os.path.exists('output/final_reel.mp4'):
+              print('### ✅ final_reel.mp4 produced')
           else:
-              print('### ✅ Avatar generated for all scenes')
+              print('### ❌ final_reel.mp4 was NOT produced -- render step failed. Check the \"Run full pipeline\" step log above for the actual npx hyperframes render error.')
           " >> $GITHUB_STEP_SUMMARY
-          fi
