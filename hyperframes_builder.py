@@ -12,21 +12,37 @@ track play sequentially at their own start time.
   track 3: voiceover audio per scene (always present, independent of
            whether the avatar video rendered, so audio never goes missing)
 
+Two fixes from the first real render:
+  1. Fonts were only NAMED in CSS, never actually loaded -- the renderer
+     fell back to a generic system font. Now loads real Google Fonts
+     (Poppins + Noto Sans in every supported script) via a <link> tag.
+  2. Scene length used Gemini's GUESSED duration_hint_sec, not the real
+     length of the generated audio -- voice could run past the scene and
+     get cut off, or leave dead air. Now measures the actual audio file
+     duration with ffprobe (already required by HyperFrames/ffmpeg) and
+     sizes each scene to match, with a small trailing buffer.
+
 Real HyperFrames syntax reference: https://github.com/heygen-com/hyperframes
 Run `npx hyperframes lint <file>` locally if a render fails -- it flags
 composition issues (overlapping clips, bad attributes) directly.
 """
 import json
 import os
+import subprocess
 
 import config
 
 STAGE_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700;800&family=Noto+Sans:wght@600;700&family=Noto+Sans+Devanagari:wght@600;700&family=Noto+Sans+Kannada:wght@600;700&family=Noto+Sans+Tamil:wght@600;700&family=Noto+Sans+Telugu:wght@600;700&family=Noto+Sans+Malayalam:wght@600;700&family=Noto+Sans+Bengali:wght@600;700&display=swap" rel="stylesheet">
 <style>
   :root {{
-    --font: 'Poppins', 'Noto Sans', 'Noto Sans Kannada', 'Noto Sans Tamil', sans-serif;
+    --font: 'Poppins', 'Noto Sans Devanagari', 'Noto Sans Kannada', 'Noto Sans Tamil',
+            'Noto Sans Telugu', 'Noto Sans Malayalam', 'Noto Sans Bengali',
+            'Noto Sans', sans-serif;
     --bg: #0a0a0a;
   }}
   body {{ margin: 0; background: var(--bg); font-family: var(--font); }}
@@ -42,13 +58,15 @@ STAGE_TEMPLATE = """<!DOCTYPE html>
   .avatar-pip video {{ width: 100%; height: 100%; object-fit: cover; }}
   .caption {{
     position: absolute; left: 60px; right: 60px; bottom: 700px;
-    color: white; font-size: 60px; font-weight: 700; line-height: 1.2;
+    color: white; font-size: 60px; font-weight: 700; line-height: 1.25;
+    font-family: var(--font);
     text-shadow: 0 4px 20px rgba(0,0,0,0.7);
     width: auto; height: auto; inset: auto;
   }}
   .outro {{
     display: flex; align-items: center; justify-content: center;
     color: white; font-size: 56px; font-weight: 700; text-align: center;
+    font-family: var(--font);
   }}
 </style>
 </head>
@@ -74,6 +92,28 @@ AVATAR_CLIP = """  <div class="avatar-pip" data-start="{start}" data-duration="{
 CAPTION_CLIP = """  <div class="clip caption" data-start="{start}" data-duration="{duration}" data-track-index="2">{caption}</div>"""
 
 AUDIO_CLIP = """  <audio src="{audio_path}" data-start="{start}" data-duration="{duration}" data-track-index="3"></audio>"""
+
+DEFAULT_DURATION = 4          # fallback if ffprobe can't read the file
+TRAILING_BUFFER_SEC = 0.4     # small pad after voice ends before cutting to next scene
+
+
+def _get_audio_duration(path: str) -> float:
+    """Real duration via ffprobe. Falls back to DEFAULT_DURATION if the
+    file is missing or ffprobe isn't available -- keeps the pipeline
+    running even in a degraded state rather than crashing."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        duration = float(result.stdout.strip())
+        if duration > 0:
+            return duration
+    except Exception as e:
+        print(f"[hyperframes_builder] ⚠️ could not measure duration of {path} "
+              f"({e}), using {DEFAULT_DURATION}s fallback")
+    return DEFAULT_DURATION
 
 
 def build_scene(script: dict = None, clip_paths: list[str] = None, image_paths: list[str] = None) -> str:
@@ -102,7 +142,8 @@ def build_scene(script: dict = None, clip_paths: list[str] = None, image_paths: 
     for scene, clip_path, image_path, audio_path in zip(
         script["scenes"], clip_paths, image_paths, audio_paths
     ):
-        duration = scene.get("duration_hint_sec", 4)
+        real_duration = _get_audio_duration(audio_path)
+        duration = round(real_duration + TRAILING_BUFFER_SEC, 2)
         start = round(t, 2)
 
         clip_blocks.append(BG_CLIP.format(
@@ -122,7 +163,7 @@ def build_scene(script: dict = None, clip_paths: list[str] = None, image_paths: 
 
         clip_blocks.append(AUDIO_CLIP.format(
             audio_path=os.path.relpath(audio_path, config.SCENES_DIR),
-            start=start, duration=duration,
+            start=start, duration=real_duration,
         ))
 
         t += duration
@@ -137,7 +178,7 @@ def build_scene(script: dict = None, clip_paths: list[str] = None, image_paths: 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"[hyperframes_builder] wrote {out_path}")
+    print(f"[hyperframes_builder] wrote {out_path} (total duration ~{round(t, 1)}s)")
     return out_path
 
 
